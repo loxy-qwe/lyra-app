@@ -7,12 +7,8 @@ LYRA, bilgisayarınızdaki sistem seslerini veya mikrofonunuzu dinleyerek çalan
 * HUD Mini Pencere Bildirimi
 * Dinamik Albüm Rengi Teması
 * Geçmiş Arşivi (İçe/Dışa Aktarma)
-* Dinleme İstatistikleri Paneli
-* Discord Rich Presence Entegrasyonu
+* Dinleme İstatistikleri Panel
 
-## 🚀 Kurulum
-1. Gerekli kütüphaneleri yükleyin: `pip install -r requirements.txt`
-2. Uygulamayı çalıştırın: `python lyra_app.py`
 
 ## 📄 Lisans
 Bu proje **loxy_qwe** tarafından geliştirilmiştir ve MIT Lisansı ile korunmaktadır.
@@ -29,11 +25,7 @@ LYRA is a minimalist desktop application that identifies currently playing songs
 * Dynamic Album Color Theme
 * History Archive (Import/Export)
 * Listening Statistics Dashboard
-* Discord Rich Presence Integration
 
-## 🚀 Installation
-1. Install the required libraries: `pip install -r requirements.txt`
-2. Run the application: `python lyra_app.py`
 
 ## 📄 License
 This project was developed by **loxy_qwe** and is protected under the MIT License.
