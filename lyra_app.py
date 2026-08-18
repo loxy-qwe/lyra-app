@@ -6,6 +6,7 @@ import keyboard
 import random
 import sys
 import json
+import threading
 import winreg as reg
 from datetime import datetime
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -43,6 +44,8 @@ LANGS = {
         "set_mic": "Aktif Mikrofon Cihazı", "set_speaker": "Aktif Sistem Ses Kaynağı",
         "set_hud": "HUD Mini Pencere (Şarkı Bulunca Göster)",
         "set_startup": "Windows Başlangıcında Otomatik Başlat",
+        "set_close_action": "Kapatma Davranışı",
+        "close_ask": "Her Zaman Sor", "close_tray": "Arka Plana Al (Tepsi)", "close_quit": "Direkt Kapat",
         "btn_eval": "Değerlendirme Formu", "note_eval": "Uygulamanın gelişmesine katkı sağlamak için değerlendirme formunu doldurabilirsiniz.",
         "btn_bug": "Bug / Error Formu", "note_bug": "Uygulamanın gelişmesine katkı sağlamak için bug/error formunu doldurabilirsiniz.",
         "about_title": "Hakkında & Lisans",
@@ -75,6 +78,8 @@ LANGS = {
         "set_mic": "Active Microphone Device", "set_speaker": "Active System Audio Source",
         "set_hud": "HUD Mini Window (Show on Song Found)",
         "set_startup": "Run Automatically on Windows Startup",
+        "set_close_action": "Close Behavior",
+        "close_ask": "Always Ask", "close_tray": "Minimize to Tray", "close_quit": "Quit Directly",
         "btn_eval": "Evaluation Form", "note_eval": "You can fill out the evaluation form to contribute to the development of the application.",
         "btn_bug": "Bug / Error Form", "note_bug": "You can fill out the bug/error form to contribute to the development of the application.",
         "about_title": "About & License",
@@ -128,7 +133,7 @@ QCheckBox::indicator:checked { background-color: #FFF; border: 1px solid #FFF; }
 """
 
 # ==========================================
-# 3. VERITABANI YONETIMI (SQLite)
+# 3. VERITABANI YONETIMI (SQLite - AppData Fix)
 # ==========================================
 import soundcard as sc
 import soundfile as sf
@@ -136,7 +141,11 @@ from shazamio import Shazam
 
 class DBManager:
     def __init__(self):
-        self.conn = sqlite3.connect("lyra_data.db", check_same_thread=False)
+        app_data = os.path.join(os.environ.get('APPDATA', ''), 'LYRA')
+        os.makedirs(app_data, exist_ok=True)
+        db_path = os.path.join(app_data, 'lyra_data.db')
+        
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
         self._init_db()
 
@@ -149,6 +158,7 @@ class DBManager:
         self.cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('selected_speaker', 'default')")
         self.cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('hud_enabled', 'true')")
         self.cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('startup_enabled', 'false')")
+        self.cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('close_action', 'ask')")
         self.cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('first_run', 'true')")
         self.conn.commit()
 
@@ -202,6 +212,10 @@ class AudioRecognizer:
         self.signals = RecognitionSignals()
         self.shazam = Shazam()
         self.is_recording = False
+        
+        app_data = os.path.join(os.environ.get('APPDATA', ''), 'LYRA')
+        os.makedirs(app_data, exist_ok=True)
+        self.temp_wav = os.path.join(app_data, 'temp_lyra.wav')
 
     def _record_chunk(self, is_system, duration=3.2):
         try:
@@ -231,7 +245,7 @@ class AudioRecognizer:
                 data = m.record(numframes=int(44100 * duration))
             
             mono_data = data[:, 0] if len(data.shape) > 1 else data
-            sf.write("temp_lyra.wav", mono_data, 44100)
+            sf.write(self.temp_wav, mono_data, 44100)
             return True
         except Exception as e:
             return str(e)
@@ -255,7 +269,7 @@ class AudioRecognizer:
                 if attempt == 0:
                     self.signals.status_changed.emit(LANGS[lang]["status_analyzing"])
 
-                out = await self.shazam.recognize('temp_lyra.wav')
+                out = await self.shazam.recognize(self.temp_wav)
                 if out and 'track' in out:
                     t = out['track']
                     result = {
@@ -277,8 +291,8 @@ class AudioRecognizer:
             self.signals.error.emit(LANGS[lang]["err_conn"])
         finally:
             self.is_recording = False
-            if os.path.exists("temp_lyra.wav"):
-                try: os.remove("temp_lyra.wav")
+            if os.path.exists(self.temp_wav):
+                try: os.remove(self.temp_wav)
                 except: pass
 
 # ==========================================
@@ -300,7 +314,6 @@ class WelcomeDialog(QDialog):
         f_layout.setContentsMargins(30, 30, 30, 30)
         f_layout.setSpacing(15)
         
-        # Dil Seçim Butonları
         lang_layout = QHBoxLayout()
         self.btn_tr = QPushButton("🇹🇷 Türkçe")
         self.btn_tr.setStyleSheet("QPushButton { background-color: #222; color: #FFF; border-radius: 8px; padding: 8px; font-size: 13px; font-weight: bold; border: 1px solid #444; } QPushButton:hover { background-color: #333; }")
@@ -348,6 +361,65 @@ class WelcomeDialog(QDialog):
         self.title_lbl.setText(t["welcome_title"])
         self.desc_lbl.setText(t["welcome_desc"])
         self.btn_start.setText(t["welcome_btn"])
+
+class CloseDialog(QDialog):
+    def __init__(self, lang="tr", parent=None):
+        super().__init__(parent, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(420, 260)
+        self.choice = None
+        self.remember = False
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        frame = QFrame(self)
+        frame.setStyleSheet("background-color: rgba(10, 10, 10, 245); border: 1px solid #222; border-radius: 20px;")
+        f_layout = QVBoxLayout(frame)
+        f_layout.setContentsMargins(25, 25, 25, 25)
+        f_layout.setSpacing(15)
+        
+        title_text = "Uygulama Kapatılsın mı?" if lang == "tr" else "Close Application?"
+        self.title_lbl = QLabel(title_text)
+        self.title_lbl.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFF; border: none;")
+        
+        desc_text = "Uygulamayı kapatmak istediğinizde ne yapılsın? Arka planda çalışmaya devam edebilir veya tamamen kapatabilirsiniz." if lang == "tr" else "What would you like to do when closing the app? It can run in the background or quit completely."
+        self.desc_lbl = QLabel(desc_text)
+        self.desc_lbl.setStyleSheet("font-size: 13px; color: #AAA; border: none;")
+        self.desc_lbl.setWordWrap(True)
+        
+        self.chk_remember = QCheckBox("Seçimimi hatırla" if lang == "tr" else "Remember my choice")
+        self.chk_remember.setStyleSheet("font-size: 14px; color: #DDD;")
+        
+        btn_layout = QHBoxLayout()
+        self.btn_tray = QPushButton("Arka Plana Al" if lang == "tr" else "Minimize to Tray")
+        self.btn_tray.setStyleSheet("QPushButton { background-color: #222; color: #FFF; border-radius: 10px; padding: 10px; font-size: 13px; font-weight: bold; border: 1px solid #444; } QPushButton:hover { background-color: #333; }")
+        self.btn_tray.clicked.connect(self.select_tray)
+        
+        self.btn_quit = QPushButton("Direkt Kapat" if lang == "tr" else "Quit Completely")
+        self.btn_quit.setStyleSheet("QPushButton { background-color: #FFF; color: #000; border-radius: 10px; padding: 10px; font-size: 13px; font-weight: bold; } QPushButton:hover { background-color: #DDD; }")
+        self.btn_quit.clicked.connect(self.select_quit)
+        
+        btn_layout.addWidget(self.btn_tray)
+        btn_layout.addWidget(self.btn_quit)
+        
+        f_layout.addWidget(self.title_lbl)
+        f_layout.addWidget(self.desc_lbl)
+        f_layout.addWidget(self.chk_remember)
+        f_layout.addSpacing(10)
+        f_layout.addLayout(btn_layout)
+        
+        layout.addWidget(frame)
+
+    def select_tray(self):
+        self.choice = 'tray'
+        self.remember = self.chk_remember.isChecked()
+        self.accept()
+
+    def select_quit(self):
+        self.choice = 'quit'
+        self.remember = self.chk_remember.isChecked()
+        self.accept()
 
 class WaveformVisualizer(QWidget):
     def __init__(self, parent=None):
@@ -621,15 +693,46 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def closeEvent(self, event):
-        if not hasattr(self, 'real_quit'):
-            event.ignore()
-            self.hide()
-            self.tray_icon.showMessage("LYRA", LANGS[self.lang]["tray_msg"], QSystemTrayIcon.Information, 2000)
-        else:
+        if hasattr(self, 'real_quit') and self.real_quit:
             if self.rpc:
                 try: self.rpc.close()
                 except: pass
             event.accept()
+            return
+
+        action = db.get_setting("close_action") or "ask"
+
+        if action == "tray":
+            event.ignore()
+            self.hide()
+            self.tray_icon.showMessage("LYRA", LANGS[self.lang]["tray_msg"], QSystemTrayIcon.Information, 2000)
+        elif action == "quit":
+            self.real_quit = True
+            if self.rpc:
+                try: self.rpc.close()
+                except: pass
+            event.accept()
+        else:
+            dlg = CloseDialog(self.lang, self)
+            if dlg.exec() == QDialog.Accepted:
+                if dlg.choice == 'tray':
+                    if dlg.remember:
+                        db.set_setting("close_action", "tray")
+                    event.ignore()
+                    self.hide()
+                    self.tray_icon.showMessage("LYRA", LANGS[self.lang]["tray_msg"], QSystemTrayIcon.Information, 2000)
+                elif dlg.choice == 'quit':
+                    if dlg.remember:
+                        db.set_setting("close_action", "quit")
+                    self.real_quit = True
+                    if self.rpc:
+                        try: self.rpc.close()
+                        except: pass
+                    event.accept()
+                else:
+                    event.ignore()
+            else:
+                event.ignore()
 
     def force_quit_app(self):
         if self.rpc:
@@ -646,7 +749,7 @@ class MainWindow(QMainWindow):
         keyboard.add_hotkey('ctrl+shift+m', self.key_sigs.mic_trigger.emit)
 
     def trigger_from_shortcut(self, is_sys):
-        asyncio.create_task(self.recognizer.start_recognition(is_system=is_sys, lang=self.lang))
+        threading.Thread(target=lambda: asyncio.run(self.recognizer.start_recognition(is_system=is_sys, lang=self.lang)), daemon=True).start()
 
     def setup_sidebar(self, parent_layout):
         sidebar = QFrame()
@@ -716,12 +819,12 @@ class MainWindow(QMainWindow):
         self.sys_btn = QPushButton()
         self.sys_btn.setObjectName("BigActionBtn")
         self.sys_btn.setFixedSize(280, 280)
-        self.sys_btn.clicked.connect(lambda: asyncio.create_task(self.recognizer.start_recognition(True, self.lang)))
+        self.sys_btn.clicked.connect(lambda: threading.Thread(target=lambda: asyncio.run(self.recognizer.start_recognition(True, self.lang)), daemon=True).start())
 
         self.mic_btn = QPushButton()
         self.mic_btn.setObjectName("BigActionBtn")
         self.mic_btn.setFixedSize(280, 280)
-        self.mic_btn.clicked.connect(lambda: asyncio.create_task(self.recognizer.start_recognition(False, self.lang)))
+        self.mic_btn.clicked.connect(lambda: threading.Thread(target=lambda: asyncio.run(self.recognizer.start_recognition(False, self.lang)), daemon=True).start())
 
         btn_layout.addStretch()
         btn_layout.addWidget(self.sys_btn)
@@ -1026,6 +1129,11 @@ class MainWindow(QMainWindow):
         self.speaker_combo = QComboBox()
         self.speaker_combo.currentIndexChanged.connect(self.save_speaker_selection)
 
+        self.lbl_close_action = QLabel()
+        self.lbl_close_action.setStyleSheet("font-size: 18px; color: #888;")
+        self.close_combo = QComboBox()
+        self.close_combo.currentIndexChanged.connect(self.save_close_action_selection)
+
         self.hud_checkbox = QCheckBox()
         self.hud_checkbox.stateChanged.connect(self.save_hud_selection)
 
@@ -1054,16 +1162,18 @@ class MainWindow(QMainWindow):
         form.addWidget(self.mic_combo, 1, 1)
         form.addWidget(self.lbl_speaker_sel, 2, 0)
         form.addWidget(self.speaker_combo, 2, 1)
-        form.addWidget(self.hud_checkbox, 3, 0, 1, 2)
-        form.addWidget(self.startup_checkbox, 4, 0, 1, 2)
+        form.addWidget(self.lbl_close_action, 3, 0)
+        form.addWidget(self.close_combo, 3, 1)
+        form.addWidget(self.hud_checkbox, 4, 0, 1, 2)
+        form.addWidget(self.startup_checkbox, 5, 0, 1, 2)
         
-        form.addWidget(self.eval_btn, 5, 0)
-        form.addWidget(self.eval_note_lbl, 5, 1)
-        form.addWidget(self.bug_btn, 6, 0)
-        form.addWidget(self.bug_note_lbl, 6, 1)
+        form.addWidget(self.eval_btn, 6, 0)
+        form.addWidget(self.eval_note_lbl, 6, 1)
+        form.addWidget(self.bug_btn, 7, 0)
+        form.addWidget(self.bug_note_lbl, 7, 1)
         
-        form.addWidget(self.lbl_set_keys, 7, 0)
-        form.addWidget(self.keys_desc_lbl, 7, 1)
+        form.addWidget(self.lbl_set_keys, 8, 0)
+        form.addWidget(self.keys_desc_lbl, 8, 1)
         
         layout.addLayout(form)
         layout.addStretch()
@@ -1098,6 +1208,19 @@ class MainWindow(QMainWindow):
             if idx2 >= 0: self.speaker_combo.setCurrentIndex(idx2)
         except:
             pass
+
+        try:
+            self.close_combo.clear()
+            t = LANGS[self.lang]
+            self.close_combo.addItem(t["close_ask"], "ask")
+            self.close_combo.addItem(t["close_tray"], "tray")
+            self.close_combo.addItem(t["close_quit"], "quit")
+
+            saved_close = db.get_setting("close_action") or "ask"
+            idx3 = self.close_combo.findData(saved_close)
+            if idx3 >= 0: self.close_combo.setCurrentIndex(idx3)
+        except:
+            pass
             
         saved_hud = db.get_setting("hud_enabled")
         self.hud_checkbox.setChecked(saved_hud == "true")
@@ -1112,6 +1235,10 @@ class MainWindow(QMainWindow):
     def save_speaker_selection(self, index):
         dev_id = self.speaker_combo.itemData(index)
         if dev_id: db.set_setting("selected_speaker", dev_id)
+
+    def save_close_action_selection(self, index):
+        val = self.close_combo.itemData(index)
+        if val: db.set_setting("close_action", val)
 
     def save_hud_selection(self, state):
         is_checked = "true" if self.hud_checkbox.isChecked() else "false"
@@ -1177,9 +1304,21 @@ class MainWindow(QMainWindow):
         self.keys_desc_lbl.setText(t["shortcuts_desc"])
         self.lbl_mic_sel.setText(t["set_mic"])
         self.lbl_speaker_sel.setText(t["set_speaker"])
+        self.lbl_close_action.setText(t["set_close_action"])
         self.hud_checkbox.setText(t["set_hud"])
         self.startup_checkbox.setText(t["set_startup"])
         
+        current_data = self.close_combo.currentData() if hasattr(self, 'close_combo') else "ask"
+        if hasattr(self, 'close_combo'):
+            self.close_combo.blockSignals(True)
+            self.close_combo.clear()
+            self.close_combo.addItem(t["close_ask"], "ask")
+            self.close_combo.addItem(t["close_tray"], "tray")
+            self.close_combo.addItem(t["close_quit"], "quit")
+            idx = self.close_combo.findData(current_data)
+            if idx >= 0: self.close_combo.setCurrentIndex(idx)
+            self.close_combo.blockSignals(False)
+
         self.eval_btn.setText(t["btn_eval"])
         self.eval_note_lbl.setText(t["note_eval"])
         self.bug_btn.setText(t["btn_bug"])
